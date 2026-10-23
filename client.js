@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: '@local/multimodal-model-router',
+  id: 'dsh-multimodal-model-router',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({
     /** Namespace for the locale dictionaries this bundle registers. */
     const NS = 'multimodal-model-router'
     const PREFIX = '/api/multimodal-model-router'
-    const BUNDLE_NAME = '@local/multimodal-model-router'
+    const BUNDLE_NAME = 'dsh-multimodal-model-router'
     /** Compact control beside the composer submit action. */
     const COMPOSER_SLOT = 'conversation.input.right'
     /** Field on this bundle's own page in the Plugins surface. */

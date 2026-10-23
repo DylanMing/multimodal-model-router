@@ -1,12 +1,30 @@
 {
-  "name": "@local/multimodal-model-router",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
+  "name": "dsh-multimodal-model-router",
+  "version": "1.1.0",
   "description": "Route image- and file-bearing requests to a chosen multimodal model while every other request stays on the primary model.",
+  "license": "MIT",
+  "author": "DylanMing",
+  "type": "module",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/DylanMing/multimodal-model-router.git"
+  },
+  "homepage": "https://github.com/DylanMing/multimodal-model-router#readme",
+  "bugs": {
+    "url": "https://github.com/DylanMing/multimodal-model-router/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "multimodal",
+    "vision",
+    "model-router"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
   },
   "exports": {
     ".": "./index.js",
@@ -21,7 +39,9 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "LICENSE",
+    "README.md",
+    "README.en.md"
   ],
   "dsh": {
     "bundle": {

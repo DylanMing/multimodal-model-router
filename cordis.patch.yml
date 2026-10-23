@@ -3,5 +3,5 @@
 # control.
 - insert:
     - id: multimodal-model-router
-      name: '@local/multimodal-model-router'
+      name: 'dsh-multimodal-model-router'
       config: {}
