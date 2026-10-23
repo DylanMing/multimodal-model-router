@@ -19,6 +19,8 @@ import { basename, dirname, extname, join } from 'node:path'
 const BRIDGE_PREFIX = '/api/multimodal-model-router'
 const MAX_BODY_BYTES = 32 * 1024
 const CATALOG_TTL_MS = 30_000
+/** Upper bound on durable session overrides, oldest dropped first. */
+const MAX_SESSION_OVERRIDES = 200
 
 /** apply() may run again on the same context during a boot re-entry. */
 const appliedContexts = new WeakSet()
@@ -189,25 +191,60 @@ export function apply(ctx, config) {
   let selected = normalizeSelection(config)
   let loaded = null
   let writes = Promise.resolve()
+  /**
+   * Session overrides are durable as well: they answer "this conversation
+   * keeps using this model", which has to survive a restart. Entries are
+   * pruned by age so abandoned sessions cannot grow the file without bound.
+   */
+  const sessionOverrides = new Map()
+
+  const pruneOverrides = () => {
+    if (sessionOverrides.size <= MAX_SESSION_OVERRIDES) return
+    const oldest = [...sessionOverrides.entries()]
+      .sort((left, right) => (left[1].updatedAt ?? '') < (right[1].updatedAt ?? '') ? -1 : 1)
+      .slice(0, sessionOverrides.size - MAX_SESSION_OVERRIDES)
+    for (const [id] of oldest) sessionOverrides.delete(id)
+  }
 
   const loadState = async () => {
     try {
       const raw = await readFile(stateFilePath(), 'utf8')
       const parsed = JSON.parse(raw)
       selected = normalizeSelection(parsed)
+      const stored = parsed?.sessions
+      if (stored !== null && typeof stored === 'object' && !Array.isArray(stored)) {
+        for (const [id, entry] of Object.entries(stored)) {
+          if (typeof id !== 'string' || id === '') continue
+          const route = normalizeSelection(entry)
+          sessionOverrides.set(id, {
+            provider: route.provider,
+            model: route.model,
+            updatedAt: typeof entry?.updatedAt === 'string' ? entry.updatedAt : new Date(0).toISOString(),
+          })
+        }
+        pruneOverrides()
+      }
     } catch (error) {
       if (error?.code !== 'ENOENT') log('warn', 'could not read the saved selection:', error?.message ?? error)
     }
   }
 
-  const saveState = (next) => {
-    selected = next
-    const snapshot = {
-      version: 1,
-      provider: next.provider,
-      model: next.model,
-      updatedAt: new Date().toISOString(),
+  const stateSnapshot = () => {
+    const sessions = {}
+    for (const [id, entry] of sessionOverrides) {
+      sessions[id] = { provider: entry.provider, model: entry.model, updatedAt: entry.updatedAt }
     }
+    return {
+      version: 2,
+      provider: selected.provider,
+      model: selected.model,
+      updatedAt: new Date().toISOString(),
+      sessions,
+    }
+  }
+
+  const persist = () => {
+    const snapshot = stateSnapshot()
     const write = async () => {
       const file = stateFilePath()
       await mkdir(dirname(file), { recursive: true })
@@ -215,6 +252,32 @@ export function apply(ctx, config) {
     }
     writes = writes.then(write, write)
     return writes
+  }
+
+  const saveState = (next) => {
+    selected = next
+    return persist()
+  }
+
+  const setOverride = (agentId, route) => {
+    sessionOverrides.set(agentId, {
+      provider: route.provider,
+      model: route.model,
+      updatedAt: new Date().toISOString(),
+    })
+    pruneOverrides()
+    return persist()
+  }
+
+  const clearOverride = (agentId) => {
+    if (!sessionOverrides.delete(agentId)) return Promise.resolve()
+    return persist()
+  }
+
+  const clearOverrides = () => {
+    if (sessionOverrides.size === 0) return Promise.resolve()
+    sessionOverrides.clear()
+    return persist()
   }
 
   loaded = loadState()
@@ -280,23 +343,19 @@ export function apply(ctx, config) {
 
   const selectionView = () => (selected.provider !== null && selected.model !== null ? { ...selected } : null)
 
-  /**
-   * Per-session overrides live in this process only: they answer "this
-   * conversation, right now" and reset when the session reopens elsewhere.
-   * A stored `{ provider: null, model: null }` means "explicitly off here".
-   */
-  const overrides = new Map()
-
   const overrideOf = (agentId) => {
     if (agentId === null || agentId === undefined) return { active: false, selected: null }
-    if (!overrides.has(agentId)) return { active: false, selected: null }
-    const entry = overrides.get(agentId)
+    const entry = sessionOverrides.get(agentId)
+    if (entry === undefined) return { active: false, selected: null }
     const off = entry.provider === null || entry.model === null
-    return { active: true, selected: off ? null : { ...entry } }
+    return { active: true, selected: off ? null : { provider: entry.provider, model: entry.model } }
   }
 
   /** The route a request from this agent should use. */
-  const effectiveSelection = (agentId) => overrideOf(agentId).active ? overrideOf(agentId).selected : selectionView()
+  const effectiveSelection = (agentId) => {
+    const override = overrideOf(agentId)
+    return override.active ? override.selected : selectionView()
+  }
 
   /**
    * Latest routing outcome, so the ambient hint under the composer can say what
@@ -342,6 +401,7 @@ export function apply(ctx, config) {
                     sessionActive: override.active,
                     session: override.selected,
                     effective: effectiveSelection(agentId),
+                    sessionCount: sessionOverrides.size,
                     providers: directory.providers,
                     models: directory.models,
                     activity,
@@ -368,7 +428,8 @@ export function apply(ctx, config) {
                 return
               }
               const next = normalizeSelection(body)
-              const scope = body?.scope === 'session' ? 'session' : 'global'
+              const scope =
+                body?.scope === 'session' ? 'session' : body?.scope === 'sessions' ? 'sessions' : 'global'
               const agentId = typeof body?.sessionId === 'string' && body.sessionId !== '' ? body.sessionId : null
               if (scope === 'session' && agentId === null) {
                 sendJson(res, 400, { ok: false, error: 'session scope needs a sessionId' })
@@ -377,7 +438,7 @@ export function apply(ctx, config) {
               try {
                 await loaded
                 if (scope === 'session' && body?.clear === true) {
-                  overrides.delete(agentId)
+                  await clearOverride(agentId)
                   sendJson(res, 200, {
                     ok: true,
                     value: {
@@ -385,6 +446,21 @@ export function apply(ctx, config) {
                       sessionActive: false,
                       session: null,
                       effective: selectionView(),
+                      sessionCount: sessionOverrides.size,
+                    },
+                  })
+                  return
+                }
+                if (scope === 'sessions' && body?.clear === true) {
+                  await clearOverrides()
+                  sendJson(res, 200, {
+                    ok: true,
+                    value: {
+                      selected: selectionView(),
+                      sessionActive: false,
+                      session: null,
+                      effective: selectionView(),
+                      sessionCount: 0,
                     },
                   })
                   return
@@ -406,7 +482,7 @@ export function apply(ctx, config) {
                   }
                 }
                 if (scope === 'session') {
-                  overrides.set(agentId, { provider: next.provider, model: next.model })
+                  await setOverride(agentId, next)
                   const override = overrideOf(agentId)
                   sendJson(res, 200, {
                     ok: true,
@@ -415,6 +491,7 @@ export function apply(ctx, config) {
                       sessionActive: override.active,
                       session: override.selected,
                       effective: effectiveSelection(agentId),
+                      sessionCount: sessionOverrides.size,
                     },
                   })
                   return
@@ -427,6 +504,7 @@ export function apply(ctx, config) {
                     sessionActive: agentId === null ? false : overrideOf(agentId).active,
                     session: agentId === null ? null : overrideOf(agentId).selected,
                     effective: effectiveSelection(agentId),
+                    sessionCount: sessionOverrides.size,
                   },
                 })
               } catch (error) {
@@ -521,7 +599,6 @@ export function apply(ctx, config) {
       const id = String(payload.agent.id)
       pendingVisual.delete(id)
       fallbackTurn.delete(id)
-      overrides.delete(id)
     } catch {}
   })
 

@@ -181,7 +181,7 @@ test('file batches also switch the route', async () => {
   })
 })
 
-test('a session override wins over the global default and resets on disposal', async () => {
+test('a session override wins over the global default and survives a reload', async () => {
   const { listeners, routes, ctx } = fakeCtx()
   apply(ctx, {})
   const preStep = listeners.get('agent/pre-step')
@@ -196,6 +196,7 @@ test('a session override wins over the global default and resets on disposal', a
   assert.equal(picked.status, 200)
   assert.equal(picked.body.value.sessionActive, true)
   assert.deepEqual(picked.body.value.effective, { provider: 'alt', model: 'alt-model' })
+  assert.equal(picked.body.value.sessionCount, 1)
 
   const scoped = await call(routes, '/api/multimodal-model-router/state', { query: `?sessionId=${overridden.id}` })
   assert.deepEqual(scoped.body.value.effective, { provider: 'alt', model: 'alt-model' })
@@ -224,11 +225,57 @@ test('a session override wins over the global default and resets on disposal', a
     model: 'p-model',
   })
 
-  // Disposal forgets the override instead of leaking it.
+  // Disposal keeps the override: it is a durable per-session choice.
   listeners.get('agent/disposed')({ agent: overridden })
   const after = await call(routes, '/api/multimodal-model-router/state', { query: `?sessionId=${overridden.id}` })
-  assert.equal(after.body.value.sessionActive, false)
-  assert.deepEqual(after.body.value.effective, { provider: 'vision', model: 'v-model' })
+  assert.equal(after.body.value.sessionActive, true)
+  assert.equal(after.body.value.effective, null)
+
+  // Restore a real route, then prove a fresh Host instance reads it back.
+  await call(routes, '/api/multimodal-model-router/select', {
+    method: 'POST',
+    body: { scope: 'session', sessionId: overridden.id, provider: 'alt', model: 'alt-model' },
+  })
+  const reloaded = fakeCtx()
+  apply(reloaded.ctx, {})
+  const stored = await call(reloaded.routes, '/api/multimodal-model-router/state', {
+    query: `?sessionId=${overridden.id}`,
+  })
+  assert.equal(stored.body.value.sessionActive, true)
+  assert.deepEqual(stored.body.value.effective, { provider: 'alt', model: 'alt-model' })
+})
+
+test('clearing every session override empties the stored map', async () => {
+  const { routes, ctx } = fakeCtx()
+  apply(ctx, {})
+
+  // Start from a known state: earlier tests leave durable overrides behind.
+  await call(routes, '/api/multimodal-model-router/select', {
+    method: 'POST',
+    body: { scope: 'sessions', clear: true },
+  })
+
+  await call(routes, '/api/multimodal-model-router/select', {
+    method: 'POST',
+    body: { scope: 'session', sessionId: 'session-a', provider: 'alt', model: 'alt-model' },
+  })
+  await call(routes, '/api/multimodal-model-router/select', {
+    method: 'POST',
+    body: { scope: 'session', sessionId: 'session-b', provider: null, model: null },
+  })
+  const before = await call(routes, '/api/multimodal-model-router/state')
+  assert.equal(before.body.value.sessionCount, 2)
+
+  const cleared = await call(routes, '/api/multimodal-model-router/select', {
+    method: 'POST',
+    body: { scope: 'sessions', clear: true },
+  })
+  assert.equal(cleared.body.value.sessionCount, 0)
+
+  const reloaded = fakeCtx()
+  apply(reloaded.ctx, {})
+  const stored = await call(reloaded.routes, '/api/multimodal-model-router/state')
+  assert.equal(stored.body.value.sessionCount, 0)
 })
 
 test('the bridge rejects an unknown route and a scoped write without a session', async () => {
