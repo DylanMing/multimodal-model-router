@@ -1,22 +1,92 @@
-# 多模态模型路由（multimodal-model-router）
+# dsh-multimodal-model-router
 
-> 仓库：<https://github.com/DylanMing/multimodal-model-router>
+> 给 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（DSH）加一条多模态分流：主模型继续负责日常对话，遇到图片或文件内容时自动切到你在输入框旁边选定的多模态模型。
 
-在主模型之外再选一个**多模态模型**。请求里出现图片或文件内容时，这一步改用多模态模型；其余请求继续用主模型。
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![version](https://img.shields.io/github/package-json/v/DylanMing/multimodal-model-router?label=version)](package.json)
+[![platform](https://img.shields.io/badge/platform-DSH%20Web-2ea44f)](#兼容性)
+[![last commit](https://img.shields.io/github/last-commit/DylanMing/multimodal-model-router)](https://github.com/DylanMing/multimodal-model-router/commits/main)
+
+中文 | [English](README.en.md)
+
+## 目录
+
+- [为什么需要它](#为什么需要它)
+- [特性](#特性)
+- [安装](#安装)
+- [使用](#使用)
+- [前置条件：模型必须声明图片输入](#前置条件模型必须声明图片输入)
+- [工作原理](#工作原理)
+- [配置与持久化](#配置与持久化)
+- [兼容性](#兼容性)
+- [已知限制](#已知限制)
+- [开发](#开发)
+- [安全](#安全)
+- [贡献](#贡献)
+- [许可证](#许可证)
+
+## 为什么需要它
+
+DSH 里“看图”有两个硬约束：
+
+1. 图片块只会发给**声明了图片输入**的路由；
+2. `read_image` 工具在当前路由没有声明图片输入时会直接拒绝执行（避免纯文本路由的会话历史里出现图片块）。
+
+于是纯文本主模型（比如 DeepSeek V4）遇到“帮我看看这张图”就卡住了——要么整场会话换成视觉模型，要么手动切来切去。这个插件把两件事拆开：**日常请求照旧走主模型，带图片/文件的请求自动转给多模态模型**，并且替你完成 `read_image` 的那一步。
+
+## 特性
+
+- **输入框旁一键选择**：模型下拉框出现在发送按钮左侧，按供应商分组，声明支持图片的模型排在前面。
+- **插件页面可视化配置**：侧边栏 **插件 → 已安装 → 多模态模型路由**，详情页里有同一个选择器，不用改配置文件。
+- **按内容自动路由**：请求里出现未 offload 的图片块或文件块时，这一步的 `provider/model` 换成多模态模型；其余请求不动。
+- **`read_image` 救援**：主模型路由被拒绝读图时，插件自己读图并按 `read_image` 的输出契约交回结果，图片进入历史，下一步请求自然落到多模态模型。
+- **全局记忆**：选择对所有会话生效，写入 `$DSH_HOME/multimodal-model-router.json`，重启后保留。
+- **中英文案**：跟随界面语言，`locale/{zh,en}.json` 提供插件元数据。
+- **无遥测、不联网**：只调用 DSH 提供的服务与自身回环桥接。
+
+## 安装
+
+### 从 GitHub 安装
+
+在 DSH Web UI 侧边栏打开 **插件**，点安装，填：
+
+```
+git+https://github.com/DylanMing/multimodal-model-router.git
+```
+
+装好后「已安装」里会出现 **多模态模型路由**，默认启用。安装过程由 DSH 的插件管理器完成（`pnpm add` + 校验 bundle 补丁），Host 半即时生效，浏览器端刷新一次页面即可看到控件。
+
+> 没有 `dsh` CLI 的桌面发行版也可以装：插件页面和 Agent 的 `plugin_manager` 工具走的是同一个 `installBundle`，都接受上面这个 spec。
+
+### 从本地目录安装（开发用）
+
+把仓库克隆到任意目录，然后用插件页面的安装入口填**绝对路径**（或 Agent 的 `plugin_manager` 安装），例如：
+
+```
+C:\dev\multimodal-model-router
+```
+
+本地链接方式安装后，改动 `index.js` 需要让插件重新 apply（插件页把本插件关掉再打开，或重启应用）；改动 `client.js` 需要刷新浏览器页面。
 
 ## 使用
 
-1. 打开任意会话，在输入框工具栏（发送按钮左侧、主模型选择器旁边）会出现一个带眼睛图标的模型下拉框。
-2. 选择支持图片的模型（下拉框按供应商分组，支持图片的模型排在前面）。
-3. 选 `关闭（使用主模型）` 即恢复为全部请求走主模型。
+**方式一：会话输入框（日常最快）**
 
-同样的选择器也在插件自己的页面里：侧边栏 **插件 → 已安装 → 多模态模型路由**，详情页描述下方就是配置块（一个下拉框 + 说明/警告）。两处读写同一个设置，改一处另一处刷新即同步（切回窗口时会自动刷新）。
+发送按钮左侧、主模型选择器旁边有一个眼睛图标的下拉框：
 
-设置在启动时读取 `$DSH_HOME/multimodal-model-router.json`（未设置 `$DSH_HOME` 时落在 `~/.dsh/`），对所有会话生效，重启后保留。
+1. 选一个支持图片的模型；
+2. 之后凡是带图片或文件的请求都会走它，普通对话仍走主模型；
+3. 选 `关闭（使用主模型）` 即恢复全走主模型。
 
-### 模型必须声明支持图片输入
+**方式二：插件页面**
 
-模型是否“支持图片”由 provider 配置里该模型的 `input` 决定。pi-ai 系列的 provider 默认当作纯文本，即使上游模型本身能看图，适配器也会把图片替换成占位文字（模型只会说“图片被省略”）。要让多模态模型真正收得到图片，在 profile 的 provider 配置里给它声明：
+侧边栏 **插件 → 已安装 → 多模态模型路由**，详情页描述下方是配置块：说明、模型下拉框、状态提示。两处读写同一个设置，改一处另一处刷新即同步（切回窗口时自动刷新）。
+
+当选中的模型没有声明图片输入时，眼睛图标会变成警示色，悬停提示会告诉你原因。
+
+## 前置条件：模型必须声明图片输入
+
+模型“能不能看图”由 provider 配置里该模型的 `input` 决定，而不是它上游的真实能力。pi-ai 系列 provider 默认按纯文本处理——未声明时适配器会把图片替换成占位文字（模型只会回答“图片被省略”）。给你的视觉模型补一行即可：
 
 ```yaml
 - id: llm-pi-ai
@@ -29,25 +99,82 @@
             input: [text, image]   # 关键：声明接受图片输入
 ```
 
-没有声明时，下拉框里选中该模型后眼睛图标会变成警示色，悬停提示会说明原因。
+改完保存，DSH 会热加载 provider 配置，插件下拉框里该模型会移动到“支持图片”分组。
 
-## 行为
+## 工作原理
 
-- 检测到 **图片** 内容块（已被 offload 的图片按文本占位符处理，不再触发）或 **文件** 内容块时，这一步的请求配置切换为该多模态模型。
-- 用户新消息里的图片在首个请求发出前尚未写入会话日志，因此插件在 `agent/pre-step` 记录该批消息是否含多媒体内容；已提交的内容（工具读图等）由 `session.deriveMessages()` 检测。
-- 切换只替换 provider / model，丢弃主模型显式设置的 reasoning effort、maxTokens 等，让新路由自行解析默认值。
-- 主模型本身也是该多模态模型时不做切换。
-- **`read_image` 救援**：`read_image` 只在当前路由声明了图片输入时才执行，否则会直接拒绝（以免纯文本路由的历史里出现图片块）。选中多模态模型后，插件在 `tools/execute` 里接管这次拒绝：用自己的 `ctx.fs` + `ctx.attachments` 读到同一张图，按该工具自己的输出 schema 交回真实结果，于是图片进入历史，下一步请求自然路由到多模态模型。没有选中模型时保持原生拒绝行为。
+```text
+用户消息 ──► agent/pre-step ──► agent/request ──► 模型调用
+              │                  │
+              │                  └─ 命中图片/文件 → 返回 { provider, model } = 多模态模型
+              └─ 记录本批消息是否含图片/文件（此时消息还没提交进会话日志）
 
-## 组成
+模型调用 read_image ──► tools/execute ──► 原生拒绝（主模型不支持图片）
+                                     └─ 插件接管：ctx.fs 读文件 + ctx.attachments 存图
+                                        → 按 read_image 自己的输出 schema 返回真实结果
+                                        → 下一步请求的历史里有图片块 → 自动路由到多模态模型
+```
 
-- `index.js`：Host 半。`agent/pre-step` + `agent/request` 路由、`tools/execute` 读图救援；`/api/multimodal-model-router/{state,select}` 供浏览器读写选择；模型目录来自 `ctx.llm`。
-- `client.js`：Web 半。在 `conversation.input.right`（输入框工具栏）和 `plugins.bundle.config`（插件详情页，键为本包名）各注册一个选择器，共用同一套读写逻辑。
-- `cordis.patch.yml`：插入 `multimodal-model-router` 行。
+几个关键设计：
 
-## 限制
+- **为什么在 `agent/pre-step` 记录**：用户新消息里的图片在首个请求发出前还没写入会话日志，`session.deriveMessages()` 看不到它们；已提交的内容（工具读图、历史图片）仍然由 `deriveMessages()` 检测。
+- **为什么只替换 provider/model**：主模型显式设置的 reasoning effort、maxTokens 等对新路由未必成立，切换时丢弃，让新路由解析自己的默认值。
+- **为什么救援必须由插件做**：`read_image` 的拒绝发生在工具执行时，此时本步已经在主模型上跑完，只有工具结果能改变下一步的历史。
+- **已 offload 的图片**：`dsh-compaction-image-offload` 会把超预算的图片换成文本占位符，这类块不再触发切换。
 
-- 选择是全局偏好，不是按会话保存的。
-- 浏览器桥接走同源 HTTP（与项目内其他手写 UI 插件一致），无独立鉴权；服务端默认只监听回环地址。
-- 图片能力的判定来自 provider 配置；未声明 `image` 的模型即使上游支持也不会收到图片。
-- 只有在“已选中多模态模型”时才会救援 `read_image`；关闭后行为与原生一致。
+## 配置与持久化
+
+- 选择存于 `$DSH_HOME/multimodal-model-router.json`；未设置 `DSH_HOME` 时落在 `~/.dsh/multimodal-model-router.json`。
+- 文件内容：`{ "version": 1, "provider": "...", "model": "...", "updatedAt": "..." }`，`provider`/`model` 为 `null` 表示关闭。
+- 插件没有 Config schema（插件页里是自定义面板，不是通用表单），因此不需要改 profile 的 `cordis.patch.yml` 来配置它。
+
+## 兼容性
+
+- 在 **DSH 0.2.1-rc.2**（桌面版，Web UI）上验证。
+- 依赖的扩展点：`agent/pre-step`、`agent/request`、`agent/disposed`、`tools/execute`、`ctx.llm`、`ctx.fs`、`ctx.attachments`、`ctx.workingDirectory`、`ctx.sessions`，以及 Web 槽位 `conversation.input.right`、`plugins.bundle.config`。
+- 仅支持 Web 形态的 DSH（`dsh.client.platform = web`）；CLI/TUI 没有输入框控件，但 Host 半的路由本身与界面无关。
+
+## 已知限制
+
+- 选择是**全局偏好**，不按会话保存。
+- 图片能力完全取自 provider 配置，插件不探测、不伪造。
+- 浏览器与 Host 之间的桥接是同源 HTTP（`/api/multimodal-model-router/*`），没有独立鉴权，依赖 Host 只监听回环地址。
+- 只救援 `read_image`；其它会产生图片块的扩展需要各自适配。
+
+## 开发
+
+```text
+.
+├── index.js           # Host 半：路由、救援、状态持久化、/api 桥接
+├── client.js          # Web 半：输入框控件 + 插件页配置面板
+├── cordis.patch.yml   # bundle 补丁：插入 multimodal-model-router 行
+├── locale/            # 插件显示元数据（zh / en）
+├── icon.svg           # 插件图标
+└── package.json       # dsh.bundle / dsh.client 声明
+```
+
+本地检查：
+
+```bash
+node --check index.js
+node --check client.js
+```
+
+调试要点：
+
+- 桥接接口 `GET http://127.0.0.1:<port>/api/multimodal-model-router/state` 可以直接看当前选择与模型目录（无需登录，仅回环）。
+- 想确认某次请求真的换了模型，看会话日志里的 `request/header` 事件：`reason=change` 且 `config.model` 是多模态模型即命中；工具结果则是 `blocks=['text','image']`。
+
+## 安全
+
+- 插件不上传任何数据，不读凭据，不发起外部网络请求。
+- 图片经 `ctx.attachments` 持久化在本地，路径由 DSH 的附件存储决定。
+- 桥接接口只返回模型目录和当前选择，写入接口只接受已存在于目录中的 `provider/model` 组合。
+
+## 贡献
+
+欢迎 issue 和 PR。提交前请确保两个入口都能跑通（`node --check`、插件页关闭再开启后控件仍可用），并在 PR 描述里说明验证方式。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 DylanMing
