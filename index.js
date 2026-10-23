@@ -151,6 +151,16 @@ function readJsonBody(req) {
   })
 }
 
+/** Session identity carried by the composer's query string, if any. */
+function sessionIdOf(req) {
+  try {
+    const id = new URL(req.url ?? '/', 'http://localhost').searchParams.get('sessionId')
+    return id !== null && id !== '' ? id : null
+  } catch {
+    return null
+  }
+}
+
 function normalizeSelection(value) {
   if (value === null || typeof value !== 'object') return { provider: null, model: null }
   const provider = typeof value.provider === 'string' && value.provider !== '' ? value.provider : null
@@ -271,16 +281,34 @@ export function apply(ctx, config) {
   const selectionView = () => (selected.provider !== null && selected.model !== null ? { ...selected } : null)
 
   /**
+   * Per-session overrides live in this process only: they answer "this
+   * conversation, right now" and reset when the session reopens elsewhere.
+   * A stored `{ provider: null, model: null }` means "explicitly off here".
+   */
+  const overrides = new Map()
+
+  const overrideOf = (agentId) => {
+    if (agentId === null || agentId === undefined) return { active: false, selected: null }
+    if (!overrides.has(agentId)) return { active: false, selected: null }
+    const entry = overrides.get(agentId)
+    const off = entry.provider === null || entry.model === null
+    return { active: true, selected: off ? null : { ...entry } }
+  }
+
+  /** The route a request from this agent should use. */
+  const effectiveSelection = (agentId) => overrideOf(agentId).active ? overrideOf(agentId).selected : selectionView()
+
+  /**
    * Latest routing outcome, so the ambient hint under the composer can say what
    * actually happened instead of only what is configured.
    */
   let activity = null
-  const recordActivity = (kind, agentId, reason) => {
+  const recordActivity = (kind, agentId, route, reason) => {
     activity = {
       kind,
       sessionId: agentId === undefined ? null : String(agentId),
-      provider: selected.provider,
-      model: selected.model,
+      provider: route?.provider ?? null,
+      model: route?.model ?? null,
       at: Date.now(),
       ...(reason === undefined ? {} : { reason }),
     }
@@ -305,10 +333,15 @@ export function apply(ctx, config) {
                 await loaded
                 const llm = ctx.get('llm')
                 const directory = llm === undefined ? { providers: [], models: [] } : await catalog(llm)
+                const agentId = sessionIdOf(req)
+                const override = overrideOf(agentId)
                 sendJson(res, 200, {
                   ok: true,
                   value: {
                     selected: selectionView(),
+                    sessionActive: override.active,
+                    session: override.selected,
+                    effective: effectiveSelection(agentId),
                     providers: directory.providers,
                     models: directory.models,
                     activity,
@@ -335,8 +368,27 @@ export function apply(ctx, config) {
                 return
               }
               const next = normalizeSelection(body)
+              const scope = body?.scope === 'session' ? 'session' : 'global'
+              const agentId = typeof body?.sessionId === 'string' && body.sessionId !== '' ? body.sessionId : null
+              if (scope === 'session' && agentId === null) {
+                sendJson(res, 400, { ok: false, error: 'session scope needs a sessionId' })
+                return
+              }
               try {
                 await loaded
+                if (scope === 'session' && body?.clear === true) {
+                  overrides.delete(agentId)
+                  sendJson(res, 200, {
+                    ok: true,
+                    value: {
+                      selected: selectionView(),
+                      sessionActive: false,
+                      session: null,
+                      effective: selectionView(),
+                    },
+                  })
+                  return
+                }
                 if (next.provider !== null) {
                   const llm = ctx.get('llm')
                   if (llm !== undefined) {
@@ -353,8 +405,30 @@ export function apply(ctx, config) {
                     }
                   }
                 }
+                if (scope === 'session') {
+                  overrides.set(agentId, { provider: next.provider, model: next.model })
+                  const override = overrideOf(agentId)
+                  sendJson(res, 200, {
+                    ok: true,
+                    value: {
+                      selected: selectionView(),
+                      sessionActive: override.active,
+                      session: override.selected,
+                      effective: effectiveSelection(agentId),
+                    },
+                  })
+                  return
+                }
                 await saveState(next)
-                sendJson(res, 200, { ok: true, value: { selected: selectionView() } })
+                sendJson(res, 200, {
+                  ok: true,
+                  value: {
+                    selected: selectionView(),
+                    sessionActive: agentId === null ? false : overrideOf(agentId).active,
+                    session: agentId === null ? null : overrideOf(agentId).selected,
+                    effective: effectiveSelection(agentId),
+                  },
+                })
               } catch (error) {
                 log('warn', 'could not save the selection:', error?.message ?? error)
                 sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
@@ -374,22 +448,25 @@ export function apply(ctx, config) {
               }
               try {
                 await loaded
+                const agentId = sessionIdOf(req)
+                const override = overrideOf(agentId)
+                const effective = effectiveSelection(agentId)
                 let name = null
-                if (selected.provider !== null && selected.model !== null) {
+                if (effective !== null) {
                   const llm = ctx.get('llm')
                   if (llm !== undefined) {
                     try {
                       const directory = await catalog(llm)
                       name =
                         directory.models.find(
-                          (entry) => entry.provider === selected.provider && entry.model === selected.model,
+                          (entry) => entry.provider === effective.provider && entry.model === effective.model,
                         )?.name ?? null
                     } catch {}
                   }
                 }
                 sendJson(res, 200, {
                   ok: true,
-                  value: { selected: selectionView(), name, activity },
+                  value: { selected: effective, sessionActive: override.active, name, activity },
                 })
               } catch (error) {
                 sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
@@ -444,6 +521,7 @@ export function apply(ctx, config) {
       const id = String(payload.agent.id)
       pendingVisual.delete(id)
       fallbackTurn.delete(id)
+      overrides.delete(id)
     } catch {}
   })
 
@@ -451,13 +529,14 @@ export function apply(ctx, config) {
     const config = await next()
     try {
       await loaded
-      if (selected.provider === null || selected.model === null) return config
-
       const agentId = String(payload.agent.id)
+      const effective = effectiveSelection(agentId)
+      if (effective === null) return config
+
       const fellBack = fallbackTurn.get(agentId)
       if (fellBack !== undefined && fellBack !== payload.turn) fallbackTurn.delete(agentId)
       if (fallbackTurn.get(agentId) === payload.turn) return config
-      if (config.provider === selected.provider && config.model === selected.model) return config
+      if (config.provider === effective.provider && config.model === effective.model) return config
 
       let visual = pendingVisual.get(agentId) === true
       if (!visual) {
@@ -471,8 +550,8 @@ export function apply(ctx, config) {
 
       // Drop explicit controls the new route may not accept; the adapter
       // resolves its own effort and token defaults under this route.
-      recordActivity('routed', agentId)
-      return { provider: selected.provider, model: selected.model }
+      recordActivity('routed', agentId, effective)
+      return { provider: effective.provider, model: effective.model }
     } catch (error) {
       log('warn', 'routing decision failed, keeping the primary route:', error?.message ?? error)
       return config
@@ -488,17 +567,18 @@ export function apply(ctx, config) {
   ctx.on('agent/request-error', async (payload, next) => {
     try {
       await loaded
-      if (selected.provider === null || selected.model === null) return next()
-      if (payload.provider !== selected.provider) return next()
-      if (payload.signal?.aborted === true) return next()
       const agentId = String(payload.agent?.id ?? '')
       if (agentId === '') return next()
+      const effective = effectiveSelection(agentId)
+      if (effective === null) return next()
+      if (payload.provider !== effective.provider) return next()
+      if (payload.signal?.aborted === true) return next()
       if (fallbackTurn.get(agentId) === payload.turn) return next()
 
       fallbackTurn.set(agentId, payload.turn)
       const code = typeof payload.failure?.code === 'string' ? payload.failure.code : 'ERROR'
-      recordActivity('fallback', agentId, code)
-      log('warn', `multimodal route ${selected.provider}/${selected.model} failed (${code}); retrying on the primary model`)
+      recordActivity('fallback', agentId, effective, code)
+      log('warn', `multimodal route ${effective.provider}/${effective.model} failed (${code}); retrying on the primary model`)
       return { kind: 'retry' }
     } catch (error) {
       log('warn', 'fallback decision failed, leaving the failure terminal:', error?.message ?? error)
@@ -550,7 +630,8 @@ export function apply(ctx, config) {
     if (!ROUTE_REFUSAL.test(String(result.error?.message ?? ''))) return result
     try {
       await loaded
-      if (selected.provider === null || selected.model === null) return result
+      const effective = effectiveSelection(String(exec.agent?.id ?? ''))
+      if (effective === null) return result
       const value = await readImageValue(exec)
       if (value === undefined) return result
       return { isError: false, value, content: [] }
