@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Syntax check both halves
+        run: |
+          node --check index.js
+          node --check client.js
+
+      - name: Unit tests
+        run: node --test test/
+
+      - name: Manifest and bundle patch exist
+        run: |
+          node -e "
+            const fs = require('node:fs')
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'))
+            if (!pkg.name) throw new Error('package.json: missing name')
+            if (!pkg.version) throw new Error('package.json: missing version')
+            if (!pkg.dsh?.bundle?.patch) throw new Error('package.json: missing dsh.bundle.patch')
+            if (!pkg.dsh?.client) throw new Error('package.json: missing dsh.client')
+            if (!fs.existsSync(pkg.dsh.bundle.patch)) throw new Error('bundle patch file is missing')
+            for (const file of ['index.js', 'client.js', 'LICENSE']) {
+              if (!fs.existsSync(file)) throw new Error('missing ' + file)
+            }
+            console.log(pkg.name + '@' + pkg.version)
+          "
+
+      - name: Release tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(node -p "JSON.parse(require('node:fs').readFileSync('package.json','utf8')).version")
+          tag=${GITHUB_REF_NAME#v}
+          if [ "$version" != "$tag" ]; then
+            echo "::error::tag v$tag does not match package.json version $version"
+            exit 1
+          fi
+          echo "tag v$tag matches package.json"

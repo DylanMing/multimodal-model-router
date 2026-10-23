@@ -8,6 +8,8 @@
 
 [中文](README.md) | English
 
+> **Unofficial.** This is a community plugin, not a DeepSeek component, and is not affiliated with DeepSeek. Harness releases may change the extension points it relies on.
+
 ## Why
 
 DSH only sends image blocks to a route that **declares image input**, and `read_image` refuses to execute on a route that does not — by design, so a text route's durable history never holds images. With a text-only primary model, "take a look at this screenshot" therefore deadlocks unless you switch the whole session to a vision model. This plugin splits the two concerns: ordinary requests stay on the primary model, image/file requests switch to a multimodal model, and the plugin performs the `read_image` step that the text route cannot.
@@ -17,6 +19,8 @@ DSH only sends image blocks to a route that **declares image input**, and `read_
 - **One control beside the composer** — a provider-grouped model picker with image-capable models first, and a clear "off" entry.
 - **Configurable on the plugin page** — sidebar **Plugins → Installed → Multimodal Model Router** renders the same picker, no config files involved.
 - **Content-driven routing** — a step whose request carries a non-offloaded image block or a file block is rerouted; everything else stays put.
+- **Visible routing** — a line under the composer names the target model, marked "just switched" for a couple of minutes after a real switch.
+- **Automatic fallback** — if the multimodal route fails (quota, auth, retired model), the step retries on the primary model and the hint line says so.
 - **`read_image` rescue** — when the primary route is refused, the plugin reads the image itself and returns a result that satisfies the tool's own output contract, so the image enters history and the next request lands on the multimodal model.
 - **Profile-wide and persistent** — stored in `$DSH_HOME/multimodal-model-router.json`, survives restarts.
 - **Localized** — zh/en UI copy and plugin metadata.
@@ -76,6 +80,12 @@ Design notes:
 - Only `provider`/`model` are replaced; explicit reasoning effort, maxTokens, and similar controls are dropped so the new route resolves its own defaults.
 - Images already offloaded by `dsh-compaction-image-offload` no longer trigger a switch.
 
+## Feedback and fallback
+
+Once a multimodal model is selected, a line under the composer reads `Images/files → <model>`. After a step actually reroutes, it appends `just switched` for about two minutes; if the route failed and the step fell back, the line turns into a warning instead.
+
+The fallback uses `agent/request-error`: when the multimodal route fails, the plugin marks the turn, returns `{ kind: 'retry' }`, and the retry re-enters `agent/request`, which now resolves the primary model. The rest of that turn stays on the primary model; the next turn tries the multimodal route again. Only `finish.kind === 'error'` failures take this path — a `prepareCall` failure such as `NO_ADAPTER` ends the turn before the plugin can intervene.
+
 ## Storage and configuration
 
 - Selection: `$DSH_HOME/multimodal-model-router.json` (falls back to `~/.dsh/`).
@@ -98,10 +108,11 @@ Design notes:
 ## Development
 
 ```text
-index.js           Host half: routing, rescue, persistence, /api bridge
-client.js          Web half: composer control + bundle settings panel
+index.js           Host half: routing, rescue, fallback, persistence, /api bridge
+client.js          Web half: composer control, hint line, bundle settings panel
 cordis.patch.yml   bundle patch inserting the plugin row
 locale/            display metadata (zh, en)
+test/              unit tests for the Host routing and fallback decisions
 icon.svg           bundle icon
 package.json       dsh.bundle / dsh.client declarations
 ```
@@ -109,6 +120,7 @@ package.json       dsh.bundle / dsh.client declarations
 ```bash
 node --check index.js
 node --check client.js
+node --test test/
 ```
 
 `GET /api/multimodal-model-router/state` shows the current selection and model catalog. In a session log, a routed step appears as a `request/header` event with `reason=change`, and a rescued read as a tool result with `blocks=['text','image']`.
