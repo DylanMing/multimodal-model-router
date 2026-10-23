@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "description": "Route image- and file-bearing requests to a chosen multimodal model while every other request stays on the primary model.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DylanMing/multimodal-model-router.git"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

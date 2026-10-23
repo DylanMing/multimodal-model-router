@@ -1,5 +1,7 @@
 # 多模态模型路由（multimodal-model-router）
 
+> 仓库：<https://github.com/DylanMing/multimodal-model-router>
+
 在主模型之外再选一个**多模态模型**。请求里出现图片或文件内容时，这一步改用多模态模型；其余请求继续用主模型。
 
 ## 使用
