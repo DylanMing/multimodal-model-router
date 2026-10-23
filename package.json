@@ -1,6 +1,6 @@
 {
   "name": "dsh-multimodal-model-router",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Route image- and file-bearing requests to a chosen multimodal model while every other request stays on the primary model.",
   "license": "MIT",
   "author": "DylanMing",

@@ -48,7 +48,7 @@ For local development, install the package directory by absolute path instead (`
 - `All` — writes the global default, shared by every session.
 - `This session` — writes an override for the current session only.
 
-Clicking the button switches scope: going from `All` to `This session` copies the currently effective model into a session override (nothing visible changes), and going back clears the override so the session follows the global default again. Overrides live in the Host process and disappear on restart.
+Clicking the button switches scope: going from `All` to `This session` copies the currently effective model into a session override (nothing visible changes), and going back clears the override so the session follows the global default again. Overrides are written to the state file and survive restarts.
 
 A selected model that does not declare image input turns the eye icon into a warning color, and the tooltip explains why.
 
@@ -95,11 +95,13 @@ The fallback uses `agent/request-error`: when the multimodal route fails, the pl
 
 ## Storage and configuration
 
-- **Global default**: `$DSH_HOME/multimodal-model-router.json` (falls back to `~/.dsh/`).
-- Shape: `{ "version": 1, "provider": string|null, "model": string|null, "updatedAt": string }`, where `null` means off.
-- **Session overrides** stay in Host memory, keyed by session id and dropped on `agent/disposed`; they are not written to disk.
-- Resolution order: session override → global default → off. Sessions without an override follow the global default as it changes.
+- State: `$DSH_HOME/multimodal-model-router.json` (falls back to `~/.dsh/`).
+- Shape (v2): top-level `provider`/`model` are the global default (`null` = off), and `sessions` holds one entry per session that overrides it — a `null` pair there means "no switching in this session".
+- A v1 file without `sessions` needs no migration; it is simply read as "no overrides".
+- At most 200 session overrides are kept; past that the oldest `updatedAt` entries are dropped. Entries left behind by deleted sessions are not swept immediately — they age out of the cap or are cleared from the plugin page.
 - The bundle declares no Config schema; the plugin page renders a custom panel, so nothing in `cordis.patch.yml` needs editing.
+
+Resolution order: session override → global default → off. Sessions without an override follow the global default as it changes.
 
 ## Compatibility
 
@@ -109,7 +111,7 @@ The fallback uses `agent/request-error`: when the multimodal route fails, the pl
 
 ## Limits
 
-- Session overrides are process-local: a restart, or reopening the session elsewhere, falls back to the global default.
+- Session overrides persist but never expire on their own: entries for deleted sessions can linger until the 200-entry cap or "Clear all" removes them.
 - A fork does not inherit an override.
 - Image capability is read from provider configuration and never faked.
 - The browser bridge is same-origin HTTP (`/api/multimodal-model-router/*`) with no separate auth; it relies on the Host listening on loopback only.

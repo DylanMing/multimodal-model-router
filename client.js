@@ -38,6 +38,8 @@ window.__ModuleLoader__.load({
         scopeSession: 'This session',
         scopeToSession: 'Give this session its own model; the global default stays unchanged',
         scopeToGlobal: 'Follow the global setting again',
+        sessionsCount: '{count} session(s) keep their own setting',
+        clearSessions: 'Clear all',
         off: 'Off (primary model)',
         visionGroup: 'image-capable',
         otherGroup: 'other models',
@@ -64,6 +66,8 @@ window.__ModuleLoader__.load({
         scopeSession: '本会话',
         scopeToSession: '让本会话单独使用一个模型，全局默认不变',
         scopeToGlobal: '恢复跟随全局设置',
+        sessionsCount: '{count} 个会话有单独设置',
+        clearSessions: '全部清除',
         off: '关闭（使用主模型）',
         visionGroup: '支持图片',
         otherGroup: '其他模型',
@@ -107,6 +111,10 @@ window.__ModuleLoader__.load({
       '.mmr-note[data-tone="warn"]{color:var(--dsw-alias-state-warn-primary)}',
       '.mmr-note[data-tone="error"]{color:var(--dsw-alias-state-error-primary)}',
       '.mmr-summary{font-size:12px;color:var(--dsw-alias-label-secondary)}',
+      '.mmr-sessions{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dsw-alias-label-secondary)}',
+      '.mmr-link{padding:0;border:0;background:none;color:var(--dsw-alias-brand-primary);font:inherit;font-size:12px;cursor:pointer}',
+      '.mmr-link:hover:not(:disabled){text-decoration:underline}',
+      '.mmr-link:disabled{opacity:.5;cursor:default}',
       /* ambient hint under the composer */
       '.mmr-dock{display:flex;align-items:center;gap:5px;padding:3px 2px 0;font:inherit;font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary)}',
       '.mmr-dock .mmr-icon{width:12px;height:12px;opacity:.6}',
@@ -319,12 +327,28 @@ window.__ModuleLoader__.load({
           }
         }, [post, merge, sessionActive, effective])
 
+        const clearSessions = React.useCallback(async () => {
+          setBusy(true)
+          setFailure(null)
+          try {
+            const value = await post({ scope: 'sessions', clear: true })
+            if (!alive.current) return
+            merge(value)
+          } catch (error) {
+            if (!alive.current) return
+            setFailure(String(error?.message ?? error))
+          } finally {
+            if (alive.current) setBusy(false)
+          }
+        }, [post, merge])
+
         return {
           phase,
           models,
           selected: effective,
           globalSelected: data?.selected ?? null,
           sessionActive,
+          sessionCount: typeof data?.sessionCount === 'number' ? data.sessionCount : 0,
           canScope: sessionId !== undefined && sessionId !== null,
           selectedEntry,
           value,
@@ -332,6 +356,7 @@ window.__ModuleLoader__.load({
           failure,
           choose,
           toggleScope,
+          clearSessions,
           selectedLacksVision: selectedEntry !== undefined && selectedEntry.vision === false,
         }
       }
@@ -558,6 +583,23 @@ window.__ModuleLoader__.load({
               modelOptions(router),
             ),
           ),
+          router.sessionCount > 0
+            ? h(
+                'div',
+                { className: 'mmr-sessions' },
+                h('span', null, translate('sessionsCount', { count: router.sessionCount })),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'mmr-link',
+                    disabled: router.busy,
+                    onClick: () => router.clearSessions(),
+                  },
+                  translate('clearSessions'),
+                ),
+              )
+            : null,
           note,
         )
       }
