@@ -45,6 +45,8 @@ For local development, install the package directory by absolute path instead (`
 
 **Scope.** The button beside the dropdown shows where the next change lands:
 
+![The multimodal picker and its scope button in the composer](docs/composer.png)
+
 - `All` — writes the global default, shared by every session.
 - `This session` — writes an override for the current session only.
 
