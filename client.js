@@ -12,6 +12,10 @@ window.__ModuleLoader__.load({
     const COMPOSER_SLOT = 'conversation.input.right'
     /** Field on this bundle's own page in the Plugins surface. */
     const BUNDLE_SLOT = 'plugins.bundle.config'
+    /** Ambient hint below the composer card. */
+    const DOCK_SLOT = 'conversation.composer.dock'
+    /** How long a routing outcome stays worth mentioning. */
+    const ACTIVITY_TTL_MS = 120_000
     const SLOT_ID = 'multimodal-model-router'
     const SEP = '\u0001'
 
@@ -27,6 +31,9 @@ window.__ModuleLoader__.load({
           'This model does not declare image input, so image content is dropped instead of sent. Enable image input for it under Settings → Models.',
         summaryOff: 'Off — every request uses the primary model',
         summaryOn: 'Image and file requests use {model}',
+        dockTo: 'Images/files → {model}',
+        dockRouted: 'just switched',
+        dockFallback: 'vision route failed — fell back to the primary model',
         off: 'Off (primary model)',
         visionGroup: 'image-capable',
         otherGroup: 'other models',
@@ -46,6 +53,9 @@ window.__ModuleLoader__.load({
           '该模型未声明支持图片输入，图片内容会被丢弃而不是发送；请在“设置 → 模型”里为它启用图片输入。',
         summaryOff: '关闭 —— 所有请求使用主模型',
         summaryOn: '图片与文件请求使用 {model}',
+        dockTo: '图片/文件 → {model}',
+        dockRouted: '刚刚已切换',
+        dockFallback: '视觉路由失败，已回退主模型',
         off: '关闭（使用主模型）',
         visionGroup: '支持图片',
         otherGroup: '其他模型',
@@ -84,6 +94,13 @@ window.__ModuleLoader__.load({
       '.mmr-note[data-tone="warn"]{color:var(--dsw-alias-state-warn-primary)}',
       '.mmr-note[data-tone="error"]{color:var(--dsw-alias-state-error-primary)}',
       '.mmr-summary{font-size:12px;color:var(--dsw-alias-label-secondary)}',
+      /* ambient hint under the composer */
+      '.mmr-dock{display:flex;align-items:center;gap:5px;padding:3px 2px 0;font:inherit;font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary)}',
+      '.mmr-dock .mmr-icon{width:12px;height:12px;opacity:.6}',
+      '.mmr-dock[data-tone="warn"]{color:var(--dsw-alias-state-warn-primary)}',
+      '.mmr-dock[data-tone="warn"] .mmr-icon{opacity:1}',
+      '.mmr-dock-model{color:var(--dsw-alias-label-primary)}',
+      '.mmr-dock-tail{opacity:.75}',
     ].join('')
 
     function keyOf(entry) {
@@ -247,6 +264,43 @@ window.__ModuleLoader__.load({
           choose,
           selectedLacksVision: selectedEntry !== undefined && selectedEntry.vision === false,
         }
+      }
+
+      /** Compact poll of the routing outcome; the catalog never travels here. */
+      function useActivity() {
+        const [value, setValue] = React.useState(null)
+        const alive = React.useRef(true)
+
+        React.useEffect(() => {
+          alive.current = true
+          let timer = null
+          const refresh = async () => {
+            try {
+              const response = await fetch(`${PREFIX}/activity`, {
+                credentials: 'same-origin',
+                cache: 'no-store',
+                headers: { accept: 'application/json' },
+              })
+              const body = await response.json().catch(() => null)
+              if (!alive.current || !response.ok || !body || body.ok !== true) return
+              setValue(body.value ?? null)
+            } catch {}
+          }
+          refresh()
+          timer = window.setInterval(() => {
+            if (document.visibilityState === 'hidden') return
+            refresh()
+          }, 5000)
+          const onFocus = () => refresh()
+          window.addEventListener('focus', onFocus)
+          return () => {
+            alive.current = false
+            if (timer !== null) window.clearInterval(timer)
+            window.removeEventListener('focus', onFocus)
+          }
+        }, [])
+
+        return value
       }
 
       function modelOptions(router) {
@@ -415,12 +469,58 @@ window.__ModuleLoader__.load({
         )
       }
 
+      function RouterDock(props) {
+        const state = useActivity()
+        useLocaleRevision()
+        const selected = state?.selected ?? null
+        if (selected === null) return null
+
+        const modelLabel = state?.name ?? selected.model
+        const sessionId = props?.sessionId === undefined ? null : String(props.sessionId)
+        const activity = state?.activity
+        const fresh =
+          activity !== null &&
+          activity !== undefined &&
+          typeof activity.at === 'number' &&
+          Date.now() - activity.at < ACTIVITY_TTL_MS &&
+          (activity.sessionId === null || sessionId === null || activity.sessionId === sessionId)
+
+        if (fresh && activity.kind === 'fallback') {
+          return h(
+            'div',
+            { className: 'mmr-dock', 'data-tone': 'warn' },
+            h('style', { key: 'style' }, CSS),
+            eyeIcon('mmr-icon'),
+            h('span', { className: 'mmr-dock-tail' }, translate('dockFallback')),
+          )
+        }
+
+        return h(
+          'div',
+          { className: 'mmr-dock', 'data-tone': 'info' },
+          h('style', { key: 'style' }, CSS),
+          eyeIcon('mmr-icon'),
+          h(
+            'span',
+            null,
+            translate('dockTo', { model: modelLabel }),
+            fresh && activity.kind === 'routed'
+              ? h('span', { className: 'mmr-dock-tail' }, ` · ${translate('dockRouted')}`)
+              : null,
+          ),
+        )
+      }
+
       ctx.slots.inject(COMPOSER_SLOT, () =>
         ctx.slots.register({ name: COMPOSER_SLOT, id: SLOT_ID, order: 0 }, ComposerControl),
       )
 
       ctx.slots.inject(BUNDLE_SLOT, () =>
         ctx.slots.register({ name: BUNDLE_SLOT, key: BUNDLE_NAME }, BundleConfigPanel),
+      )
+
+      ctx.slots.inject(DOCK_SLOT, () =>
+        ctx.slots.register({ name: DOCK_SLOT, id: SLOT_ID, order: 10 }, RouterDock),
       )
     }
 
