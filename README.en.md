@@ -41,7 +41,14 @@ For local development, install the package directory by absolute path instead (`
 ## Usage
 
 - **Composer**: pick a model in the eye-icon dropdown left of the send button. Requests with images or files use it; everything else uses the primary model. Choose `Off (primary model)` to disable.
-- **Plugin page**: the same picker lives on this bundle's own page, with a status note. Both entry points read and write one setting; the other side re-syncs on focus.
+- **Plugin page**: the same picker lives on this bundle's own page, with a status note. It always writes the global default.
+
+**Scope.** The button beside the dropdown shows where the next change lands:
+
+- `All` — writes the global default, shared by every session.
+- `This session` — writes an override for the current session only.
+
+Clicking the button switches scope: going from `All` to `This session` copies the currently effective model into a session override (nothing visible changes), and going back clears the override so the session follows the global default again. Overrides live in the Host process and disappear on restart.
 
 A selected model that does not declare image input turns the eye icon into a warning color, and the tooltip explains why.
 
@@ -88,8 +95,10 @@ The fallback uses `agent/request-error`: when the multimodal route fails, the pl
 
 ## Storage and configuration
 
-- Selection: `$DSH_HOME/multimodal-model-router.json` (falls back to `~/.dsh/`).
+- **Global default**: `$DSH_HOME/multimodal-model-router.json` (falls back to `~/.dsh/`).
 - Shape: `{ "version": 1, "provider": string|null, "model": string|null, "updatedAt": string }`, where `null` means off.
+- **Session overrides** stay in Host memory, keyed by session id and dropped on `agent/disposed`; they are not written to disk.
+- Resolution order: session override → global default → off. Sessions without an override follow the global default as it changes.
 - The bundle declares no Config schema; the plugin page renders a custom panel, so nothing in `cordis.patch.yml` needs editing.
 
 ## Compatibility
@@ -100,7 +109,8 @@ The fallback uses `agent/request-error`: when the multimodal route fails, the pl
 
 ## Limits
 
-- The selection is a profile-wide preference, not per session.
+- Session overrides are process-local: a restart, or reopening the session elsewhere, falls back to the global default.
+- A fork does not inherit an override.
 - Image capability is read from provider configuration and never faked.
 - The browser bridge is same-origin HTTP (`/api/multimodal-model-router/*`) with no separate auth; it relies on the Host listening on loopback only.
 - Only `read_image` is rescued.

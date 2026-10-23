@@ -22,11 +22,11 @@ window.__ModuleLoader__.load({
     const DICT = {
       en: {
         title: 'Multimodal model',
-        hint: 'Requests that carry images or files use this model; every other request stays on the primary model. Applies to all sessions.',
+        hint: 'Requests that carry images or files use this model; every other request stays on the primary model. Applies to all sessions unless this one overrides it.',
         panelHint:
           'Pick the model that should receive image and file content. Everything else — ordinary chat, tools, subagents — keeps the primary model selected in the composer.',
         panelField: 'Model for image and file requests',
-        appliesAll: 'Applies to all sessions. The same choice is one click away in the composer toolbar.',
+        appliesAll: 'Applies to every session that has no override of its own. A single session can override this from the composer toolbar.',
         warnNotVision:
           'This model does not declare image input, so image content is dropped instead of sent. Enable image input for it under Settings → Models.',
         summaryOff: 'Off — every request uses the primary model',
@@ -34,6 +34,10 @@ window.__ModuleLoader__.load({
         dockTo: 'Images/files → {model}',
         dockRouted: 'just switched',
         dockFallback: 'vision route failed — fell back to the primary model',
+        scopeGlobal: 'All',
+        scopeSession: 'This session',
+        scopeToSession: 'Give this session its own model; the global default stays unchanged',
+        scopeToGlobal: 'Follow the global setting again',
         off: 'Off (primary model)',
         visionGroup: 'image-capable',
         otherGroup: 'other models',
@@ -44,11 +48,11 @@ window.__ModuleLoader__.load({
       },
       zh: {
         title: '多模态模型',
-        hint: '带图片或文件内容的请求使用该模型，其余请求仍使用主模型；对所有会话生效。',
+        hint: '带图片或文件内容的请求使用该模型，其余请求仍使用主模型；默认对所有会话生效，可切换为仅本会话。',
         panelHint:
           '选择用来接收图片与文件内容的模型。普通对话、工具调用、子代理等其余请求，仍然使用输入框里选的主模型。',
         panelField: '处理图片与文件请求的模型',
-        appliesAll: '对所有会话生效；同一个开关也在会话输入框工具栏里。',
+        appliesAll: '对没有单独覆盖的会话生效；单个会话可以在输入框工具栏里临时覆盖。',
         warnNotVision:
           '该模型未声明支持图片输入，图片内容会被丢弃而不是发送；请在“设置 → 模型”里为它启用图片输入。',
         summaryOff: '关闭 —— 所有请求使用主模型',
@@ -56,6 +60,10 @@ window.__ModuleLoader__.load({
         dockTo: '图片/文件 → {model}',
         dockRouted: '刚刚已切换',
         dockFallback: '视觉路由失败，已回退主模型',
+        scopeGlobal: '全局',
+        scopeSession: '本会话',
+        scopeToSession: '让本会话单独使用一个模型，全局默认不变',
+        scopeToGlobal: '恢复跟随全局设置',
         off: '关闭（使用主模型）',
         visionGroup: '支持图片',
         otherGroup: '其他模型',
@@ -68,9 +76,14 @@ window.__ModuleLoader__.load({
 
     const CSS = [
       /* composer control */
-      '.mmr-root{display:inline-flex;align-items:center;gap:3px;min-width:0;max-width:210px;color:var(--dsw-alias-label-secondary)}',
+      '.mmr-root{display:inline-flex;align-items:center;gap:3px;min-width:0;max-width:262px;color:var(--dsw-alias-label-secondary)}',
       '.mmr-icon{flex:none;width:14px;height:14px;opacity:.7;pointer-events:none}',
       '.mmr-root[data-warn="true"] .mmr-icon{color:var(--dsw-alias-state-warn-primary);opacity:1}',
+      '.mmr-scope{flex:none;height:20px;padding:0 5px;border:1px solid var(--dsw-alias-border-l1);border-radius:5px;background:transparent;color:inherit;font:inherit;font-size:10.5px;line-height:1;white-space:nowrap;cursor:pointer}',
+      '.mmr-scope:hover:not(:disabled){border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary)}',
+      '.mmr-scope:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
+      '.mmr-scope[data-active="true"]{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}',
+      '.mmr-scope:disabled{opacity:.5;cursor:default}',
       '.mmr-select{appearance:auto;min-width:64px;max-width:176px;height:26px;padding:0 2px;border:1px solid transparent;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:12px;line-height:1.2;text-overflow:ellipsis;cursor:pointer}',
       '.mmr-select:hover:not(:disabled){border-color:var(--dsw-alias-border-l1);color:var(--dsw-alias-label-primary)}',
       '.mmr-select:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
@@ -172,13 +185,19 @@ window.__ModuleLoader__.load({
         React.useEffect(() => ctx.locale.subscribe(() => bump((value) => value + 1)), [])
       }
 
-      /** Shared selection state for the composer control and the bundle page. */
-      function useRouter() {
+      /**
+       * Shared selection state. With a `sessionId` the state is resolved for
+       * that session (override or global default); without one it is the global
+       * default the bundle page manages.
+       */
+      function useRouter(sessionId) {
         const [phase, setPhase] = React.useState('loading')
         const [data, setData] = React.useState(null)
         const [busy, setBusy] = React.useState(false)
         const [failure, setFailure] = React.useState(null)
         const alive = React.useRef(true)
+        const scopeRef = React.useRef(sessionId ?? null)
+        scopeRef.current = sessionId ?? null
 
         React.useEffect(() => {
           alive.current = true
@@ -187,9 +206,19 @@ window.__ModuleLoader__.load({
           }
         }, [])
 
+        const stateUrl = React.useCallback(() => {
+          const id = scopeRef.current
+          return id === null ? `${PREFIX}/state` : `${PREFIX}/state?sessionId=${encodeURIComponent(id)}`
+        }, [])
+
+        const merge = React.useCallback((value) => {
+          if (value === null || value === undefined) return
+          setData((current) => (current === null ? { ...value } : { ...current, ...value }))
+        }, [])
+
         const refresh = React.useCallback(async () => {
           try {
-            const response = await fetch(`${PREFIX}/state`, {
+            const response = await fetch(stateUrl(), {
               credentials: 'same-origin',
               cache: 'no-store',
               headers: { accept: 'application/json' },
@@ -199,7 +228,7 @@ window.__ModuleLoader__.load({
               throw new Error(body?.error ?? `HTTP ${response.status}`)
             }
             if (!alive.current) return
-            setData(body.value)
+            merge(body.value)
             setPhase('ready')
             setFailure(null)
           } catch (error) {
@@ -207,7 +236,7 @@ window.__ModuleLoader__.load({
             setFailure(String(error?.message ?? error))
             setPhase((current) => (current === 'ready' ? current : 'error'))
           }
-        }, [])
+        }, [stateUrl, merge])
 
         React.useEffect(() => {
           refresh()
@@ -216,67 +245,112 @@ window.__ModuleLoader__.load({
           return () => window.removeEventListener('focus', onFocus)
         }, [refresh])
 
-        const selected = data?.selected ?? null
+        const effective = data?.effective ?? null
         const models = Array.isArray(data?.models) ? data.models : []
-        const value = selected === null ? '' : keyOf(selected)
-        const selectedEntry = selected === null ? undefined : models.find((entry) => keyOf(entry) === value)
+        const value = effective === null ? '' : keyOf(effective)
+        const selectedEntry = effective === null ? undefined : models.find((entry) => keyOf(entry) === value)
+        const sessionActive = data?.sessionActive === true
+
+        const post = React.useCallback(async (payload) => {
+          const response = await fetch(`${PREFIX}/select`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify(payload),
+          })
+          const body = await response.json().catch(() => null)
+          if (!response.ok || !body || body.ok !== true) {
+            throw new Error(body?.error ?? `HTTP ${response.status}`)
+          }
+          return body.value
+        }, [])
 
         const choose = React.useCallback(
-          async (next) => {
+          async (next, scope) => {
+            const target = scope ?? (sessionActive ? 'session' : 'global')
+            const id = scopeRef.current
             setBusy(true)
             setFailure(null)
-            const previous = selected
-            setData((current) => (current === null ? current : { ...current, selected: next }))
             try {
-              const response = await fetch(`${PREFIX}/select`, {
-                method: 'POST',
-                credentials: 'same-origin',
-                headers: { 'content-type': 'application/json', accept: 'application/json' },
-                body: JSON.stringify(next ?? { provider: null, model: null }),
-              })
-              const body = await response.json().catch(() => null)
-              if (!response.ok || !body || body.ok !== true) {
-                throw new Error(body?.error ?? `HTTP ${response.status}`)
+              const payload = {
+                scope: target === 'session' ? 'session' : 'global',
+                provider: next?.provider ?? null,
+                model: next?.model ?? null,
               }
+              if (payload.scope === 'session') {
+                if (id === null) throw new Error(translate('unavailable'))
+                payload.sessionId = id
+              }
+              const value = await post(payload)
               if (!alive.current) return
-              setData((current) =>
-                current === null ? current : { ...current, selected: body.value?.selected ?? null },
-              )
+              merge(value)
             } catch (error) {
               if (!alive.current) return
-              setData((current) => (current === null ? current : { ...current, selected: previous }))
               setFailure(String(error?.message ?? error))
             } finally {
               if (alive.current) setBusy(false)
             }
           },
-          [selected],
+          [post, merge, sessionActive],
         )
+
+        const toggleScope = React.useCallback(async () => {
+          const id = scopeRef.current
+          if (id === null) return
+          setBusy(true)
+          setFailure(null)
+          try {
+            const payload = sessionActive
+              ? { scope: 'session', sessionId: id, clear: true }
+              : {
+                  scope: 'session',
+                  sessionId: id,
+                  provider: effective?.provider ?? null,
+                  model: effective?.model ?? null,
+                }
+            const value = await post(payload)
+            if (!alive.current) return
+            merge(value)
+          } catch (error) {
+            if (!alive.current) return
+            setFailure(String(error?.message ?? error))
+          } finally {
+            if (alive.current) setBusy(false)
+          }
+        }, [post, merge, sessionActive, effective])
 
         return {
           phase,
           models,
-          selected,
+          selected: effective,
+          globalSelected: data?.selected ?? null,
+          sessionActive,
+          canScope: sessionId !== undefined && sessionId !== null,
           selectedEntry,
           value,
           busy,
           failure,
           choose,
+          toggleScope,
           selectedLacksVision: selectedEntry !== undefined && selectedEntry.vision === false,
         }
       }
 
       /** Compact poll of the routing outcome; the catalog never travels here. */
-      function useActivity() {
+      function useActivity(sessionId) {
         const [value, setValue] = React.useState(null)
         const alive = React.useRef(true)
+        const scopeRef = React.useRef(sessionId ?? null)
+        scopeRef.current = sessionId ?? null
 
         React.useEffect(() => {
           alive.current = true
           let timer = null
           const refresh = async () => {
             try {
-              const response = await fetch(`${PREFIX}/activity`, {
+              const id = scopeRef.current
+              const url = id === null ? `${PREFIX}/activity` : `${PREFIX}/activity?sessionId=${encodeURIComponent(id)}`
+              const response = await fetch(url, {
                 credentials: 'same-origin',
                 cache: 'no-store',
                 headers: { accept: 'application/json' },
@@ -371,8 +445,9 @@ window.__ModuleLoader__.load({
         return options
       }
 
-      function ComposerControl() {
-        const router = useRouter()
+      function ComposerControl(props) {
+        const sessionId = typeof props?.sessionId === 'string' ? props.sessionId : undefined
+        const router = useRouter(sessionId)
         useLocaleRevision()
 
         const title =
@@ -381,6 +456,8 @@ window.__ModuleLoader__.load({
             : router.selectedLacksVision
               ? `${translate('title')} — ${translate('warnNotVision')}`
               : `${translate('title')} — ${translate('hint')}`
+
+        const scopeTitle = router.sessionActive ? translate('scopeToGlobal') : translate('scopeToSession')
 
         return h(
           'span',
@@ -403,6 +480,22 @@ window.__ModuleLoader__.load({
             },
             modelOptions(router),
           ),
+          router.canScope
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'mmr-scope',
+                  title: scopeTitle,
+                  'aria-label': scopeTitle,
+                  'aria-pressed': router.sessionActive ? 'true' : 'false',
+                  'data-active': router.sessionActive ? 'true' : 'false',
+                  disabled: router.busy || router.phase === 'loading',
+                  onClick: () => router.toggleScope(),
+                },
+                router.sessionActive ? translate('scopeSession') : translate('scopeGlobal'),
+              )
+            : null,
         )
       }
 
@@ -460,7 +553,7 @@ window.__ModuleLoader__.load({
                 className: 'mmr-panel-select',
                 value: router.value,
                 disabled: router.busy || router.phase === 'loading',
-                onChange: (event) => router.choose(decode(event.currentTarget.value)),
+                onChange: (event) => router.choose(decode(event.currentTarget.value), 'global'),
               },
               modelOptions(router),
             ),
@@ -470,13 +563,13 @@ window.__ModuleLoader__.load({
       }
 
       function RouterDock(props) {
-        const state = useActivity()
+        const sessionId = props?.sessionId === undefined ? null : String(props.sessionId)
+        const state = useActivity(sessionId ?? undefined)
         useLocaleRevision()
         const selected = state?.selected ?? null
         if (selected === null) return null
 
         const modelLabel = state?.name ?? selected.model
-        const sessionId = props?.sessionId === undefined ? null : String(props.sessionId)
         const activity = state?.activity
         const fresh =
           activity !== null &&
