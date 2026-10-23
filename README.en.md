@@ -43,6 +43,8 @@ For local development, install the package directory by absolute path instead (`
 - **Composer**: pick a model in the eye-icon dropdown left of the send button. Requests with images or files use it; everything else uses the primary model. Choose `Off (primary model)` to disable.
 - **Plugin page**: the same picker lives on this bundle's own page, with a status note. It always writes the global default.
 
+![The configuration panel on the plugin page](docs/plugin-page.png)
+
 **Scope.** The button beside the dropdown shows where the next change lands:
 
 ![The multimodal picker and its scope button in the composer](docs/composer.png)
