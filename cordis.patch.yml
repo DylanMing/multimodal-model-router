@@ -1,0 +1,7 @@
+# Multimodal models add one row beside the primary model route. The Host half
+# owns the selection and the request routing; the Client half owns the composer
+# control.
+- insert:
+    - id: multimodal-model-router
+      name: '@local/multimodal-model-router'
+      config: {}

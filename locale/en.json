@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Multimodal Model Router",
+    "description": "Pick a multimodal model beside the primary model; requests that carry images or files use it, and every other request stays on the primary model."
+  }
+}
