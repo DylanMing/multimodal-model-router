@@ -270,6 +270,22 @@ export function apply(ctx, config) {
 
   const selectionView = () => (selected.provider !== null && selected.model !== null ? { ...selected } : null)
 
+  /**
+   * Latest routing outcome, so the ambient hint under the composer can say what
+   * actually happened instead of only what is configured.
+   */
+  let activity = null
+  const recordActivity = (kind, agentId, reason) => {
+    activity = {
+      kind,
+      sessionId: agentId === undefined ? null : String(agentId),
+      provider: selected.provider,
+      model: selected.model,
+      at: Date.now(),
+      ...(reason === undefined ? {} : { reason }),
+    }
+  }
+
   // --- Composer bridge -----------------------------------------------------
 
   ctx.inject(['webServer'], (sctx) => {
@@ -295,6 +311,7 @@ export function apply(ctx, config) {
                     selected: selectionView(),
                     providers: directory.providers,
                     models: directory.models,
+                    activity,
                   },
                 })
               } catch (error) {
@@ -345,6 +362,41 @@ export function apply(ctx, config) {
             },
           }),
         )
+        // Cheap poll target for the ambient hint: no catalog, just the facts.
+        disposers.push(
+          sctx.webServer.register({
+            kind: 'exact',
+            path: `${BRIDGE_PREFIX}/activity`,
+            handler: async (req, res) => {
+              if (req.method !== 'GET') {
+                sendJson(res, 405, { ok: false, error: 'method not allowed' })
+                return
+              }
+              try {
+                await loaded
+                let name = null
+                if (selected.provider !== null && selected.model !== null) {
+                  const llm = ctx.get('llm')
+                  if (llm !== undefined) {
+                    try {
+                      const directory = await catalog(llm)
+                      name =
+                        directory.models.find(
+                          (entry) => entry.provider === selected.provider && entry.model === selected.model,
+                        )?.name ?? null
+                    } catch {}
+                  }
+                }
+                sendJson(res, 200, {
+                  ok: true,
+                  value: { selected: selectionView(), name, activity },
+                })
+              } catch (error) {
+                sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+              }
+            },
+          }),
+        )
       } catch (error) {
         log('warn', 'bridge routes unavailable:', error?.message ?? error)
         for (const dispose of disposers) {
@@ -373,6 +425,12 @@ export function apply(ctx, config) {
    * surface by the time the next request is assembled.
    */
   const pendingVisual = new Map()
+  /**
+   * Turn in which the multimodal route already failed for this agent. The rest
+   * of that turn stays on the primary model instead of paying a failure per
+   * step; the next turn tries the multimodal route again.
+   */
+  const fallbackTurn = new Map()
 
   ctx.on('agent/pre-step', (payload, next) => {
     try {
@@ -383,7 +441,9 @@ export function apply(ctx, config) {
 
   ctx.on('agent/disposed', (payload) => {
     try {
-      pendingVisual.delete(String(payload.agent.id))
+      const id = String(payload.agent.id)
+      pendingVisual.delete(id)
+      fallbackTurn.delete(id)
     } catch {}
   })
 
@@ -392,9 +452,13 @@ export function apply(ctx, config) {
     try {
       await loaded
       if (selected.provider === null || selected.model === null) return config
-      if (config.provider === selected.provider && config.model === selected.model) return config
 
       const agentId = String(payload.agent.id)
+      const fellBack = fallbackTurn.get(agentId)
+      if (fellBack !== undefined && fellBack !== payload.turn) fallbackTurn.delete(agentId)
+      if (fallbackTurn.get(agentId) === payload.turn) return config
+      if (config.provider === selected.provider && config.model === selected.model) return config
+
       let visual = pendingVisual.get(agentId) === true
       if (!visual) {
         const store = ctx.get('sessions')
@@ -407,10 +471,38 @@ export function apply(ctx, config) {
 
       // Drop explicit controls the new route may not accept; the adapter
       // resolves its own effort and token defaults under this route.
+      recordActivity('routed', agentId)
       return { provider: selected.provider, model: selected.model }
     } catch (error) {
       log('warn', 'routing decision failed, keeping the primary route:', error?.message ?? error)
       return config
+    }
+  })
+
+  /**
+   * A failed multimodal attempt falls back to the primary model. Every retry
+   * re-enters `agent/request`, so marking the turn here makes the next attempt
+   * resolve the primary route while `{ kind: 'retry' }` asks the loop to try
+   * again instead of closing the step.
+   */
+  ctx.on('agent/request-error', async (payload, next) => {
+    try {
+      await loaded
+      if (selected.provider === null || selected.model === null) return next()
+      if (payload.provider !== selected.provider) return next()
+      if (payload.signal?.aborted === true) return next()
+      const agentId = String(payload.agent?.id ?? '')
+      if (agentId === '') return next()
+      if (fallbackTurn.get(agentId) === payload.turn) return next()
+
+      fallbackTurn.set(agentId, payload.turn)
+      const code = typeof payload.failure?.code === 'string' ? payload.failure.code : 'ERROR'
+      recordActivity('fallback', agentId, code)
+      log('warn', `multimodal route ${selected.provider}/${selected.model} failed (${code}); retrying on the primary model`)
+      return { kind: 'retry' }
+    } catch (error) {
+      log('warn', 'fallback decision failed, leaving the failure terminal:', error?.message ?? error)
+      return next()
     }
   })
 
